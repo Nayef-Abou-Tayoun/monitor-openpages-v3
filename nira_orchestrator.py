@@ -234,11 +234,20 @@ class DocumentMonitor:
                     print(f"✅ No documents found in process")
                     return []
                 
-                print(f"✅ Found {len(children)} document(s) via REST API")
+                print(f"🔍 Found {len(children)} child object(s) via REST API")
+                
+                # Filter for documents (typeDefinitionId: 4, 22, 42, 46)
+                documents = [child for child in children if child.get('typeDefinitionId') in ['4', '22', '42', '46']]
+                
+                if not documents:
+                    print(f"✅ No documents found (filtered by type)")
+                    return []
+                
+                print(f"✅ Found {len(documents)} document(s) after filtering")
                 
                 # Fetch detailed information for each document to get parentFolderId
                 detailed_docs = []
-                for child in children:
+                for child in documents:
                     doc_id = child.get('id')
                     doc_name = child.get('name', 'Unknown')
                     
