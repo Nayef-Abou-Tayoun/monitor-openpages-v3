@@ -15,6 +15,7 @@ import httpx
 import ibm_boto3
 from ibm_botocore.client import Config
 from dotenv import load_dotenv
+from aiohttp import web
 
 # Load environment variables
 load_dotenv()
@@ -401,8 +402,30 @@ class DocumentMonitor:
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 
+async def health_check(request):
+    """Health check endpoint for Code Engine readiness probe"""
+    return web.Response(text='OK', status=200)
+
+
+async def start_health_server():
+    """Start HTTP health check server"""
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    app.router.add_get('/', health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("✓ Health check server started on port 8080")
+
+
 async def main():
-    """Main entry point"""
+    """Main entry point - run both health server and monitor"""
+    # Start health check server
+    await start_health_server()
+    
+    # Start document monitor
     monitor = DocumentMonitor()
     await monitor.run()
 
