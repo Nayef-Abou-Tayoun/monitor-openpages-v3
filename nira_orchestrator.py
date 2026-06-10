@@ -344,16 +344,22 @@ class DocumentMonitor:
         # Filter for .docx files only and unprocessed
         new_docx_files = []
         for doc in documents:
-            doc_id = self._get_field_value(doc, 'Resource ID')
-            doc_name = self._get_field_value(doc, 'Name') or 'Unknown'
+            doc_id = self._get_field_value(doc, 'Resource ID') or doc.get('id')
+            doc_name = self._get_field_value(doc, 'Name') or doc.get('name') or 'Unknown'
+            
+            print(f"   Checking document: {doc_name} (ID: {doc_id})")
             
             # Check if it's a .docx file
             if not doc_name.lower().endswith('.docx'):
+                print(f"      Skipping - not a .docx file")
                 continue
             
             # Check if already processed
-            if self.is_processed(doc_id):
+            if self.is_processed(str(doc_id)):
+                print(f"      Skipping - already processed")
                 continue
+            
+            print(f"      ✅ New document to process!")
             
             # Store document info including parentFolderId for later use
             new_docx_files.append({
