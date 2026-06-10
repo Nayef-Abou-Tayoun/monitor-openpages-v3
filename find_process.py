@@ -294,10 +294,47 @@ class ProcessFinder:
             # Store resource_id as instance variable for later use in upload
             self.process_resource_id = resource_id
             
-            # Use the OpenPages API to get child associations (documents are children of processes)
-            # This is more reliable than complex queries
+            # Query for documents where Parent ID equals the process resource ID
+            # This finds documents attached to the process
+            try:
+                print(f"   Querying for documents with Parent ID: {resource_id}")
+                doc_query = f"SELECT * FROM [SOXDocument] WHERE [Parent ID] = '{resource_id}'"
+                doc_result = await self.client.query(doc_query, limit=100)
+                
+                if doc_result and doc_result.get('rows'):
+                    documents = doc_result['rows']
+                    print(f"✅ Found {len(documents)} document(s) via SQL query")
+                    
+                    formatted_docs = []
+                    for i, doc in enumerate(documents, 1):
+                        doc_id = self._get_field_value(doc, 'Resource ID')
+                        doc_name = self._get_field_value(doc, 'Name')
+                        doc_desc = self._get_field_value(doc, 'Description')
+                        doc_location = self._get_field_value(doc, 'Location')
+                        created_date = self._get_field_value(doc, 'Creation Date')
+                        
+                        formatted_doc = {
+                            'fields': [
+                                {'name': 'Resource ID', 'value': doc_id},
+                                {'name': 'Name', 'value': doc_name},
+                                {'name': 'Description', 'value': doc_desc},
+                                {'name': 'Location', 'value': doc_location},
+                                {'name': 'Creation Date', 'value': created_date},
+                            ]
+                        }
+                        formatted_docs.append(formatted_doc)
+                        print(f"      [{i}/{len(documents)}] {doc_name}")
+                    
+                    return formatted_docs
+                else:
+                    print(f"ℹ️  No documents found via SQL query")
+            except Exception as query_error:
+                print(f"⚠️  SQL query failed: {str(query_error)}")
+            
+            # Fallback: Use the OpenPages REST API to get child associations
             try:
                 import httpx
+                print(f"   Trying REST API fallback...")
                 # Remove /openpages from base_url if present and add /grc/api
                 base = self.client.base_url.replace('/openpages', '').rstrip('/')
                 url = f"{base}/grc/api/contents/{resource_id}/associations/children"
