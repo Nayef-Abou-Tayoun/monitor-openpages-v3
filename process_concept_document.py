@@ -16,6 +16,7 @@ import base64
 import io
 import re
 import asyncio
+import nest_asyncio
 from datetime import datetime
 from typing import Optional, Dict, Any
 import requests
@@ -24,6 +25,9 @@ from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from dotenv import load_dotenv
 import pytz
+
+# Apply nest_asyncio to allow asyncio.run() in existing event loops
+nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv()
@@ -805,7 +809,7 @@ class ConceptDocumentProcessor:
         # If no pattern found, return 0
         return 0
     
-    def process_document(self, docx_path: str, doc_id: str = "DOC-001",
+    async def process_document(self, docx_path: str, doc_id: str = "DOC-001",
                         process_id: str = None, num_runs: int = 5) -> Optional[Dict[str, Any]]:
         """Main processing workflow - runs agent multiple times and selects best result"""
         print(f"\n{'='*70}")
@@ -880,14 +884,12 @@ class ConceptDocumentProcessor:
             
             # Run async upload
             try:
-                uploaded_doc_id = asyncio.run(
-                    self.upload_to_openpages(
-                        docx_content,
-                        filename,
-                        description,
-                        process_resource_id=process_id if process_id and process_id != "PROC-001" else "31619",
-                        folder_id="31628"
-                    )
+                uploaded_doc_id = await self.upload_to_openpages(
+                    docx_content,
+                    filename,
+                    description,
+                    process_resource_id=process_id if process_id and process_id != "PROC-001" else "31619",
+                    folder_id="31628"
                 )
                 if uploaded_doc_id:
                     self.log(f"✅ Successfully uploaded to OpenPages (Doc ID: {uploaded_doc_id})")
@@ -913,7 +915,7 @@ class ConceptDocumentProcessor:
         return wxo_result
 
 
-def main():
+async def main():
     """Main entry point"""
     # Check for document path argument
     if len(sys.argv) < 2:
@@ -940,7 +942,7 @@ def main():
     
     try:
         processor = ConceptDocumentProcessor()
-        result = processor.process_document(docx_path)
+        result = await processor.process_document(docx_path)
         
         if result:
             print("\n✅ Success! Document processed and outputs saved.")
@@ -960,6 +962,7 @@ def main():
 
 
 if __name__ == "__main__":
+    asyncio.run(main())
     main()
 
 # Made with Bob
