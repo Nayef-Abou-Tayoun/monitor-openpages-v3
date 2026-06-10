@@ -299,8 +299,9 @@ class DocumentMonitor:
             self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
         
         try:
-            # Use correct base URL
-            url = f"{OPENPAGES_SERVER}/grc/api/contents/{doc_id}/file"
+            # Remove /openpages from base URL and use correct document download endpoint
+            base = OPENPAGES_SERVER.replace('/openpages', '').rstrip('/') if OPENPAGES_SERVER else ""
+            url = f"{base}/grc/api/contents/{doc_id}/document"
             
             response = await self.http_client.get(
                 url,
