@@ -389,6 +389,7 @@ class DocumentMonitor:
     
     async def process_cos_documents(self):
         """Process documents from COS Process_AML folder"""
+        print("\n🔍 Checking COS for documents to process...")
         try:
             # List objects in Process_AML folder
             response = self.cos_client.list_objects_v2(
@@ -397,7 +398,10 @@ class DocumentMonitor:
             )
             
             if 'Contents' not in response:
+                print("   ✅ No documents in Process_AML folder")
                 return
+            
+            print(f"   Found {len(response['Contents'])} object(s) in Process_AML folder")
             
             for obj in response['Contents']:
                 key = obj['Key']
