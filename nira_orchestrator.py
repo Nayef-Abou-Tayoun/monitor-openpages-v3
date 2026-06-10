@@ -36,6 +36,9 @@ COS_BUCKET_NAME = os.getenv("COS_BUCKET_NAME")
 # Check interval
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 
+# Clear tracking flag
+CLEAR_TRACKING = os.getenv("CLEAR_TRACKING", "false").lower() == "true"
+
 # Watson Orchestrate Configuration
 WXO_API_KEY = os.getenv("WXO_API_KEY")
 WXO_INSTANCE_ID = os.getenv("WXO_INSTANCE_ID")
@@ -108,6 +111,18 @@ class DocumentMonitor:
     
     def load_processed_docs(self) -> set:
         """Load list of already processed document IDs from COS"""
+        # If CLEAR_TRACKING is set, delete the tracking file and start fresh
+        if CLEAR_TRACKING:
+            try:
+                self.cos_client.delete_object(
+                    Bucket=COS_BUCKET_NAME,
+                    Key=self.processed_docs_file
+                )
+                print("🗑️  Cleared tracking file - will reprocess all documents")
+            except:
+                pass
+            return set()
+        
         try:
             response = self.cos_client.get_object(
                 Bucket=COS_BUCKET_NAME,
