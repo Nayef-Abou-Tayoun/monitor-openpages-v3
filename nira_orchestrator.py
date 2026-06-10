@@ -36,6 +36,11 @@ COS_BUCKET_NAME = os.getenv("COS_BUCKET_NAME")
 # Check interval
 CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 
+# Watson Orchestrate Configuration
+WXO_API_KEY = os.getenv("WXO_API_KEY")
+WXO_INSTANCE_ID = os.getenv("WXO_INSTANCE_ID")
+WXO_AGENT_ID = os.getenv("WXO_AGENT_ID")
+
 
 class DocumentMonitor:
     """Monitor OpenPages for new .docx files and upload to COS"""
@@ -382,6 +387,74 @@ class DocumentMonitor:
                 self.mark_as_processed(doc['id'])
                 print(f"   ✅ Marked as processed")
     
+    async def process_cos_documents(self):
+        """Process documents from COS Process_AML folder"""
+        try:
+            # List objects in Process_AML folder
+            response = self.cos_client.list_objects_v2(
+                Bucket=COS_BUCKET_NAME,
+                Prefix='Process_AML'
+            )
+            
+            if 'Contents' not in response:
+                return
+            
+            for obj in response['Contents']:
+                key = obj['Key']
+                
+                # Skip if not a .docx file
+                if not key.lower().endswith('.docx'):
+                    continue
+                
+                filename = os.path.basename(key)
+                print(f"\n📥 Found document in COS: {filename}")
+                
+                # Download document from COS
+                print(f"   Downloading from COS...")
+                doc_response = self.cos_client.get_object(Bucket=COS_BUCKET_NAME, Key=key)
+                doc_content = doc_response['Body'].read()
+                
+                # Save temporarily
+                temp_path = f"/tmp/{filename}"
+                with open(temp_path, 'wb') as f:
+                    f.write(doc_content)
+                print(f"   ✅ Downloaded ({len(doc_content)} bytes)")
+                
+                # Get metadata (parentFolderId)
+                metadata = doc_response.get('Metadata', {})
+                parent_folder_id = metadata.get('parentfolderid', '31628')
+                
+                # Process with Watson Orchestrate
+                print(f"   🤖 Processing with Watson Orchestrate...")
+                from process_concept_document import ConceptDocumentProcessor
+                
+                processor = ConceptDocumentProcessor()
+                result = processor.process_document(
+                    temp_path,
+                    doc_id=key,
+                    process_id=PROCESS_ID,
+                    num_runs=1  # Single run for automated processing
+                )
+                
+                if result:
+                    print(f"   ✅ NIRA report generated successfully")
+                    
+                    # Delete the input document from COS
+                    print(f"   🗑️  Deleting input document from COS...")
+                    self.cos_client.delete_object(Bucket=COS_BUCKET_NAME, Key=key)
+                    print(f"   ✅ Input document deleted")
+                else:
+                    print(f"   ❌ Failed to generate NIRA report")
+                
+                # Clean up temp file
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                    
+        except Exception as e:
+            print(f"❌ Error processing COS documents: {str(e)}")
+            import traceback
+            traceback.print_exc()
+    
     async def run(self):
         """Run the monitor in a continuous loop"""
         print("\n" + "="*70)
@@ -394,7 +467,11 @@ class DocumentMonitor:
         
         while True:
             try:
+                # Part 1: Monitor OpenPages for new documents
                 await self.process_new_documents()
+                
+                # Part 2: Process documents from COS
+                await self.process_cos_documents()
             except Exception as e:
                 print(f"\n❌ Error in monitoring loop: {str(e)}")
             
