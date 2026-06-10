@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-NIRA Orchestrator - Complete Workflow
-1. Monitor OpenPages process for new documents
-2. Upload documents to COS
-3. Process documents with Watson Orchestrate
-4. Upload NIRA reports back to OpenPages
+NIRA Orchestrator - Document Monitor Service
+Monitors OpenPages process for new .docx files and uploads them to COS
 """
 
 import os
@@ -12,20 +9,12 @@ import sys
 import asyncio
 import json
 import base64
-import requests
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import httpx
 import ibm_boto3
 from ibm_botocore.client import Config
 from dotenv import load_dotenv
-
-# Disable SSL warnings
-requests.packages.urllib3.disable_warnings()
-
-# Import our existing modules
-from find_process import ProcessFinder
-from process_concept_document import ConceptDocumentProcessor
 
 # Load environment variables
 load_dotenv()
@@ -35,7 +24,7 @@ OPENPAGES_SERVER = os.getenv("OPENPAGES_SERVER")
 OPENPAGES_USERNAME = os.getenv("OPENPAGES_USERNAME")
 OPENPAGES_PASSWORD = os.getenv("OPENPAGES_PASSWORD")
 PROCESS_ID = os.getenv("PROCESS_ID", "31619")
-PROCESS_NAME = os.getenv("PROCESS_NAME", "AML Process")
+PROCESS_NAME = os.getenv("PROCESS_NAME", "AML_PROC_00081")
 
 # COS Configuration
 COS_API_KEY = os.getenv("COS_API_KEY")
@@ -43,16 +32,18 @@ COS_INSTANCE_CRN = os.getenv("COS_INSTANCE_CRN")
 COS_ENDPOINT = os.getenv("COS_ENDPOINT")
 COS_BUCKET_NAME = os.getenv("COS_BUCKET_NAME")
 
+# Check interval
+CHECK_INTERVAL_SECONDS = int(os.getenv("CHECK_INTERVAL_SECONDS", "5"))
 
-class NIRAOrchestrator:
-    """Orchestrate the complete NIRA workflow"""
+
+class DocumentMonitor:
+    """Monitor OpenPages for new .docx files and upload to COS"""
     
     def __init__(self):
-        self.process_finder = None
-        self.concept_processor = ConceptDocumentProcessor()
         self.cos_client = None
+        self.http_client = None
         
-        # Initialize COS client if configured
+        # Initialize COS client
         if all([COS_API_KEY, COS_INSTANCE_CRN, COS_ENDPOINT, COS_BUCKET_NAME]):
             self.cos_client = ibm_boto3.client(
                 's3',
@@ -61,40 +52,39 @@ class NIRAOrchestrator:
                 config=Config(signature_version='oauth'),
                 endpoint_url=COS_ENDPOINT
             )
-            self.log("✅ COS client initialized")
+            print("✓ IBM Cloud Object Storage initialized")
+            print(f"   Bucket: {COS_BUCKET_NAME}")
         else:
-            self.log("⚠ COS not configured - will process local files only")
+            print("❌ COS not configured")
+            sys.exit(1)
         
         # Track processed documents
         self.processed_docs_file = "processed_documents.json"
         self.processed_docs = self.load_processed_docs()
     
     def load_processed_docs(self) -> set:
-        """Load list of already processed document IDs"""
-        if self.cos_client:
-            try:
-                response = self.cos_client.get_object(
-                    Bucket=COS_BUCKET_NAME,
-                    Key=self.processed_docs_file
-                )
-                data = json.loads(response['Body'].read())
-                return set(data.get('processed_ids', []))
-            except:
-                return set()
-        return set()
+        """Load list of already processed document IDs from COS"""
+        try:
+            response = self.cos_client.get_object(
+                Bucket=COS_BUCKET_NAME,
+                Key=self.processed_docs_file
+            )
+            data = json.loads(response['Body'].read())
+            return set(data.get('processed_ids', []))
+        except:
+            return set()
     
     def save_processed_docs(self):
         """Save list of processed document IDs to COS"""
-        if self.cos_client:
-            try:
-                data = {'processed_ids': list(self.processed_docs)}
-                self.cos_client.put_object(
-                    Bucket=COS_BUCKET_NAME,
-                    Key=self.processed_docs_file,
-                    Body=json.dumps(data)
-                )
-            except Exception as e:
-                self.log(f"⚠ Failed to save processed docs list: {str(e)}")
+        try:
+            data = {'processed_ids': list(self.processed_docs)}
+            self.cos_client.put_object(
+                Bucket=COS_BUCKET_NAME,
+                Key=self.processed_docs_file,
+                Body=json.dumps(data)
+            )
+        except Exception as e:
+            print(f"⚠ Failed to save processed docs list: {str(e)}")
     
     def mark_as_processed(self, doc_id: str):
         """Mark a document as processed"""
@@ -105,293 +95,263 @@ class NIRAOrchestrator:
         """Check if document has already been processed"""
         return doc_id in self.processed_docs
     
-    def log(self, message: str):
-        """Print timestamped log message"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] {message}")
+    def _get_field_value(self, row: Dict[str, Any], field_name: str) -> Any:
+        """Extract field value from OpenPages row structure"""
+        if 'fields' in row:
+            for field in row['fields']:
+                if field.get('name') == field_name:
+                    return field.get('value')
+        return row.get(field_name)  # Fallback to direct access
     
-    async def delete_document_from_openpages(self, doc_id: str) -> bool:
-        """Delete a document from OpenPages after processing"""
+    async def find_process_by_id(self, process_id: str) -> Optional[Dict[str, Any]]:
+        """Find process by ID using OpenPages API"""
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
+        
         try:
-            base = OPENPAGES_SERVER.replace('/openpages', '').rstrip('/')
-            url = f"{base}/grc/api/contents/{doc_id}"
+            # Query for the process - use correct API endpoint
+            url = f"{OPENPAGES_SERVER}/opgrc/api/v2/query"
             
-            async with httpx.AsyncClient(verify=False, follow_redirects=True) as http_client:
-                response = await http_client.delete(
-                    url,
-                    auth=(OPENPAGES_USERNAME, OPENPAGES_PASSWORD),
-                    timeout=30.0
-                )
-                
-                if response.status_code in [200, 204]:
-                    self.log(f"   🗑️  Deleted document from OpenPages (ID: {doc_id})")
-                    return True
-                else:
-                    self.log(f"   ⚠ Failed to delete document: HTTP {response.status_code}")
-                    return False
+            auth_header = base64.b64encode(f"{OPENPAGES_USERNAME}:{OPENPAGES_PASSWORD}".encode()).decode()
+            headers = {
+                'Authorization': f'Basic {auth_header}',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+            
+            query = f"SELECT * FROM [SOXProcess] WHERE [Name] = '{process_id}'"
+            payload = {
+                'statement': query,
+                'offset': 0,
+                'max_rows': 500,
+                'limit': 1,
+                'case_insensitive': False,
+                'honor_primary': False
+            }
+            
+            response = await self.http_client.post(url, json=payload, headers=headers)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('rows') and len(result['rows']) > 0:
+                    return result['rows'][0]
+            else:
+                print(f"⚠ Query failed with status {response.status_code}")
+            
+            return None
         except Exception as e:
-            self.log(f"   ❌ Error deleting document: {str(e)}")
-            return False
+            print(f"⚠ Request error: {str(e)}")
+            return None
     
-    async def find_and_download_documents(self, process_id: str) -> List[Dict[str, Any]]:
-        """Find documents in OpenPages process and download them (skip already processed)"""
-        self.log(f"🔍 Finding documents in process {process_id}...")
+    async def find_documents_in_process(self, resource_id: str) -> List[Dict[str, Any]]:
+        """Find documents attached to a process using REST API (same as original find_process.py)"""
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
         
-        if not all([OPENPAGES_SERVER, OPENPAGES_USERNAME, OPENPAGES_PASSWORD]):
-            self.log("❌ OpenPages credentials not configured")
-            return []
-        
-        # Initialize OpenPages client
-        from find_process import OpenPagesClient
-        openpages_client = OpenPagesClient(
-            base_url=OPENPAGES_SERVER,
-            username=OPENPAGES_USERNAME,
-            password=OPENPAGES_PASSWORD
-        )
-        
-        # Initialize process finder
-        self.process_finder = ProcessFinder(openpages_client)
-        
-        # Find process by ID
-        process_info = await self.process_finder.find_process_by_id(process_id)
-        
-        if not process_info:
-            self.log(f"❌ Process {process_id} not found")
-            return []
-        
-        self.log(f"✅ Found process: {process_id}")
-        
-        # Query for documents in the process
-        query = f"SELECT * FROM [SOXDocument] WHERE [Parent] = '{process_info.get('resource_id')}'"
-        result = await openpages_client.query(query, limit=100)
-        
-        documents = []
-        if result and result.get('rows'):
-            for doc in result['rows']:
-                doc_id = doc.get('resource_id')
-                doc_name = doc.get('name', 'Unknown')
+        try:
+            # Use REST API to get child associations (documents) - same method as original find_process.py
+            url = f"{OPENPAGES_SERVER}/grc/api/contents/{resource_id}/associations/children"
+            
+            headers = {
+                'Accept': 'application/json'
+            }
+            
+            response = await self.http_client.get(
+                url,
+                headers=headers,
+                auth=(OPENPAGES_USERNAME, OPENPAGES_PASSWORD)
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                # The API returns a list of child objects
+                children = []
+                if isinstance(result, list):
+                    children = result
+                elif isinstance(result, dict) and 'children' in result:
+                    children = result['children']
                 
-                # Skip if already processed
-                if self.is_processed(doc_id):
-                    self.log(f"   ⏭️  Skipping (already processed): {doc_name}")
-                    continue
+                if not children:
+                    print(f"✅ No documents found in process")
+                    return []
                 
-                # Get document content
-                doc_url = f"{OPENPAGES_SERVER}/rest/2/content/{doc_id}"
-                auth_header = base64.b64encode(f"{OPENPAGES_USERNAME}:{OPENPAGES_PASSWORD}".encode()).decode()
+                print(f"✅ Found {len(children)} document(s) via REST API")
                 
-                try:
-                    response = requests.get(
-                        doc_url,
-                        headers={'Authorization': f'Basic {auth_header}'},
-                        verify=False,
-                        timeout=30
+                # Fetch detailed information for each document to get parentFolderId
+                detailed_docs = []
+                for child in children:
+                    doc_id = child.get('id')
+                    doc_name = child.get('name', 'Unknown')
+                    
+                    # Get document details including parentFolderId
+                    detail_url = f"{OPENPAGES_SERVER}/grc/api/contents/{doc_id}"
+                    detail_response = await self.http_client.get(
+                        detail_url,
+                        headers=headers,
+                        auth=(OPENPAGES_USERNAME, OPENPAGES_PASSWORD)
                     )
                     
-                    if response.status_code == 200:
-                        content = response.content
-                        documents.append({
-                            'id': doc_id,
-                            'name': doc_name,
-                            'content': content,
-                            'size': len(content)
-                        })
-                        self.log(f"   ✅ Downloaded: {doc_name} ({len(content)} bytes)")
+                    if detail_response.status_code == 200:
+                        doc_details = detail_response.json()
+                        # Add parentFolderId to the document info
+                        child['parentFolderId'] = doc_details.get('parentFolderId')
+                        child['name'] = doc_details.get('name', doc_name)
+                        detailed_docs.append(child)
                     else:
-                        self.log(f"   ⚠️  Failed to download {doc_name}: HTTP {response.status_code}")
-                except Exception as e:
-                    self.log(f"   ❌ Error downloading {doc_name}: {str(e)}")
-        
-        self.log(f"✅ Found {len(documents)} new documents to process")
-        return documents
-    
-    def upload_to_cos(self, content: bytes, filename: str, process_id: str) -> bool:
-        """Upload document to COS"""
-        if not self.cos_client:
-            self.log("⚠ COS not configured, skipping upload")
-            return False
-        
-        try:
-            key = f"Process_{process_id}/{filename}"
-            self.cos_client.put_object(
-                Bucket=COS_BUCKET_NAME,
-                Key=key,
-                Body=content
-            )
-            self.log(f"   ✅ Uploaded to COS: {key}")
-            return True
+                        # Still include the document even if we can't get details
+                        detailed_docs.append(child)
+                
+                return detailed_docs
+            else:
+                print(f"⚠ REST API failed with status {response.status_code}")
+                return []
+            
         except Exception as e:
-            self.log(f"   ❌ COS upload failed: {str(e)}")
-            return False
+            print(f"⚠ Request error: {str(e)}")
+            return []
     
-    def download_from_cos(self, key: str) -> Optional[bytes]:
-        """Download document from COS"""
-        if not self.cos_client:
-            return None
+    async def download_document(self, doc_id: str, doc_name: str) -> Optional[bytes]:
+        """Download document content from OpenPages"""
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
         
         try:
-            response = self.cos_client.get_object(
-                Bucket=COS_BUCKET_NAME,
-                Key=key
-            )
-            return response['Body'].read()
-        except Exception as e:
-            self.log(f"   ❌ COS download failed: {str(e)}")
-            return None
-    
-    def save_local_file(self, content: bytes, filename: str) -> str:
-        """Save document locally for processing"""
-        filepath = f"/tmp/{filename}"
-        with open(filepath, 'wb') as f:
-            f.write(content)
-        return filepath
-    
-    async def process_document(self, doc_info: Dict[str, Any], process_id: str) -> Optional[str]:
-        """Process a single document through the NIRA workflow"""
-        doc_id = doc_info['id']
-        doc_name = doc_info['name']
-        doc_content = doc_info['content']
-        
-        self.log(f"\n{'='*70}")
-        self.log(f"📄 Processing: {doc_name}")
-        self.log(f"{'='*70}")
-        
-        # Step 1: Upload to COS (optional)
-        if self.cos_client:
-            self.upload_to_cos(doc_content, doc_name, process_id)
-        
-        # Step 2: Save locally for processing
-        local_path = self.save_local_file(doc_content, doc_name)
-        self.log(f"💾 Saved locally: {local_path}")
-        
-        # Step 3: Process with Watson Orchestrate
-        try:
-            result = await self.concept_processor.process_document(
-                local_path,
-                doc_id=doc_id,
-                process_id=process_id,
-                num_runs=5,
-                upload_to_op=True
+            # Use correct base URL
+            url = f"{OPENPAGES_SERVER}/grc/api/contents/{doc_id}/file"
+            
+            response = await self.http_client.get(
+                url,
+                auth=(OPENPAGES_USERNAME, OPENPAGES_PASSWORD)
             )
             
-            if result:
-                self.log(f"✅ Successfully processed {doc_name}")
-                
-                # Step 4: Mark as processed
-                self.mark_as_processed(doc_id)
-                self.log(f"   ✅ Marked as processed")
-                
-                # Step 5: Delete from OpenPages to prevent reprocessing
-                await self.delete_document_from_openpages(doc_id)
-                
-                return result.get('summary')
+            if response.status_code == 200:
+                return response.content
             else:
-                self.log(f"❌ Failed to process {doc_name}")
+                print(f"   ⚠ Failed to download: HTTP {response.status_code}")
                 return None
-                
         except Exception as e:
-            self.log(f"❌ Error processing {doc_name}: {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"   ❌ Error downloading: {str(e)}")
             return None
-        finally:
-            # Cleanup local file
-            if os.path.exists(local_path):
-                os.remove(local_path)
     
-    async def run_workflow(self, process_id: str = None):
-        """Run the complete NIRA workflow"""
-        if not process_id:
-            process_id = PROCESS_ID
+    async def upload_to_cos(self, filename: str, content: bytes, parent_folder_id: str = None) -> bool:
+        """Upload file to COS with metadata"""
+        try:
+            # Prepare metadata
+            metadata = {}
+            if parent_folder_id:
+                metadata['parentfolderid'] = parent_folder_id
+                print(f"   📁 Parent Folder ID: {parent_folder_id}")
+            
+            self.cos_client.put_object(
+                Bucket=COS_BUCKET_NAME,
+                Key=f"incoming/{filename}",
+                Body=content,
+                Metadata=metadata
+            )
+            print(f"   ✅ Uploaded to COS: incoming/{filename}")
+            return True
+        except Exception as e:
+            print(f"   ❌ Failed to upload to COS: {str(e)}")
+            return False
+    
+    async def process_new_documents(self):
+        """Main workflow: Find new .docx files and upload to COS"""
+        print("\n" + "="*70)
+        print("🚀 DOCUMENT MONITOR - STARTING CHECK")
+        print("="*70)
+        print(f"Process ID: {PROCESS_NAME}")
+        print("="*70)
+        print()
         
-        self.log(f"\n{'='*70}")
-        self.log(f"🚀 NIRA ORCHESTRATOR - STARTING WORKFLOW")
-        self.log(f"{'='*70}")
-        self.log(f"Process ID: {process_id}")
-        self.log(f"Process Name: {PROCESS_NAME}")
-        self.log(f"{'='*70}\n")
+        # Find the process
+        print(f"🔍 Finding process: {PROCESS_NAME}...")
+        process = await self.find_process_by_id(PROCESS_NAME)
         
-        # Step 1: Find and download documents from OpenPages
-        documents = await self.find_and_download_documents(process_id)
-        
-        if not documents:
-            self.log("⚠ No documents found to process")
+        if not process:
+            print(f"❌ Process {PROCESS_NAME} not found")
             return
         
-        # Step 2: Process each document
-        results = []
+        print(f"✅ Found process: {PROCESS_NAME}")
+        resource_id = self._get_field_value(process, 'Resource ID')
+        print(f"   Resource ID: {resource_id}")
+        
+        # Find documents in the process
+        documents = await self.find_documents_in_process(resource_id)
+        
+        if not documents:
+            print("✅ No documents found in process")
+            return
+        
+        # Filter for .docx files only and unprocessed
+        new_docx_files = []
         for doc in documents:
-            result = await self.process_document(doc, process_id)
-            if result:
-                results.append({
-                    'document': doc['name'],
-                    'status': 'success',
-                    'summary': result[:200] + '...' if len(result) > 200 else result
-                })
-            else:
-                results.append({
-                    'document': doc['name'],
-                    'status': 'failed'
-                })
+            doc_id = self._get_field_value(doc, 'Resource ID')
+            doc_name = self._get_field_value(doc, 'Name') or 'Unknown'
+            
+            # Check if it's a .docx file
+            if not doc_name.lower().endswith('.docx'):
+                continue
+            
+            # Check if already processed
+            if self.is_processed(doc_id):
+                continue
+            
+            # Store document info including parentFolderId for later use
+            new_docx_files.append({
+                'id': doc_id,
+                'name': doc_name,
+                'parentFolderId': doc.get('parentFolderId')  # Store folder ID for uploading NIRA reports
+            })
         
-        # Step 3: Summary
-        self.log(f"\n{'='*70}")
-        self.log(f"✅ WORKFLOW COMPLETE")
-        self.log(f"{'='*70}")
-        self.log(f"Total documents: {len(documents)}")
-        self.log(f"Successful: {sum(1 for r in results if r['status'] == 'success')}")
-        self.log(f"Failed: {sum(1 for r in results if r['status'] == 'failed')}")
-        self.log(f"{'='*70}\n")
+        if not new_docx_files:
+            print("✅ No new .docx files to process")
+            return
         
-        return results
+        print(f"\n📄 Found {len(new_docx_files)} new .docx file(s):")
+        for i, doc in enumerate(new_docx_files, 1):
+            print(f"   [{i}/{len(new_docx_files)}] {doc['name']}")
+        
+        # Download and upload each document
+        for doc in new_docx_files:
+            print(f"\n📥 Processing: {doc['name']}")
+            
+            # Download from OpenPages
+            content = await self.download_document(doc['id'], doc['name'])
+            if not content:
+                continue
+            
+            print(f"   ✅ Downloaded ({len(content)} bytes)")
+            
+            # Upload to COS with parentFolderId metadata
+            if await self.upload_to_cos(doc['name'], content, doc.get('parentFolderId')):
+                # Mark as processed
+                self.mark_as_processed(doc['id'])
+                print(f"   ✅ Marked as processed")
+    
+    async def run(self):
+        """Run the monitor in a continuous loop"""
+        print("\n" + "="*70)
+        print("🎯 DOCUMENT MONITOR SERVICE STARTED")
+        print("="*70)
+        print(f"Monitoring process: {PROCESS_NAME}")
+        print(f"Check interval: {CHECK_INTERVAL_SECONDS} seconds")
+        print(f"COS Bucket: {COS_BUCKET_NAME}")
+        print("="*70)
+        
+        while True:
+            try:
+                await self.process_new_documents()
+            except Exception as e:
+                print(f"\n❌ Error in monitoring loop: {str(e)}")
+            
+            print(f"\n⏳ Waiting {CHECK_INTERVAL_SECONDS} seconds before next check...")
+            await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
 
 async def main():
-    """Main entry point - Continuous monitoring mode"""
-    # Get process ID from command line or environment
-    process_id = sys.argv[1] if len(sys.argv) > 1 else PROCESS_ID
-    
-    # Get check interval from environment (default 5 seconds)
-    check_interval = int(os.getenv('CHECK_INTERVAL_SECONDS', '5'))
-    
-    # Validate configuration
-    if not all([OPENPAGES_SERVER, OPENPAGES_USERNAME, OPENPAGES_PASSWORD]):
-        print("❌ Error: OpenPages credentials not configured")
-        print("   Required: OPENPAGES_SERVER, OPENPAGES_USERNAME, OPENPAGES_PASSWORD")
-        sys.exit(1)
-    
-    print(f"\n{'='*70}")
-    print(f"🔄 NIRA ORCHESTRATOR - CONTINUOUS MONITORING MODE")
-    print(f"{'='*70}")
-    print(f"Process: {process_id} ({PROCESS_NAME})")
-    print(f"Check Interval: {check_interval} seconds")
-    print(f"Press Ctrl+C to stop")
-    print(f"{'='*70}\n")
-    
-    orchestrator = NIRAOrchestrator()
-    
-    try:
-        while True:
-            try:
-                # Run workflow
-                await orchestrator.run_workflow(process_id)
-                
-                # Wait before next check
-                print(f"\n⏳ Waiting {check_interval} seconds before next check...")
-                await asyncio.sleep(check_interval)
-                
-            except Exception as e:
-                print(f"\n❌ Error in workflow: {e}")
-                import traceback
-                traceback.print_exc()
-                print(f"\n⏳ Waiting {check_interval} seconds before retry...")
-                await asyncio.sleep(check_interval)
-                
-    except KeyboardInterrupt:
-        print("\n\n⏹ Monitoring stopped by user")
-        sys.exit(0)
-
-        sys.exit(1)
+    """Main entry point"""
+    monitor = DocumentMonitor()
+    await monitor.run()
 
 
 if __name__ == "__main__":
