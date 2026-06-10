@@ -418,20 +418,20 @@ class DocumentMonitor:
                 print(f"   ✅ Marked as processed")
     
     async def process_cos_documents(self):
-        """Process documents from COS Process_AML folder"""
+        """Process documents from COS incoming folder"""
         print("\n🔍 Checking COS for documents to process...")
         try:
-            # List objects in Process_AML folder
+            # List objects in incoming folder
             response = self.cos_client.list_objects_v2(
                 Bucket=COS_BUCKET_NAME,
-                Prefix='Process_AML'
+                Prefix='incoming/'
             )
             
             if 'Contents' not in response:
-                print("   ✅ No documents in Process_AML folder")
+                print("   ✅ No documents in incoming folder")
                 return
             
-            print(f"   Found {len(response['Contents'])} object(s) in Process_AML folder")
+            print(f"   Found {len(response['Contents'])} object(s) in incoming folder")
             
             for obj in response['Contents']:
                 key = obj['Key']
