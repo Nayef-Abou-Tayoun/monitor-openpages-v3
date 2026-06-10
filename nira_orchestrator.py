@@ -138,7 +138,11 @@ class NIRAOrchestrator:
         
         # Initialize OpenPages client
         from find_process import OpenPagesClient
-        openpages_client = OpenPagesClient()
+        openpages_client = OpenPagesClient(
+            base_url=OPENPAGES_SERVER,
+            username=OPENPAGES_USERNAME,
+            password=OPENPAGES_PASSWORD
+        )
         
         # Initialize process finder
         self.process_finder = ProcessFinder(openpages_client)
