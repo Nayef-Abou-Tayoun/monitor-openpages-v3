@@ -136,12 +136,12 @@ class NIRAOrchestrator:
             self.log("❌ OpenPages credentials not configured")
             return []
         
+        # Initialize OpenPages client
+        from find_process import OpenPagesClient
+        openpages_client = OpenPagesClient()
+        
         # Initialize process finder
-        self.process_finder = ProcessFinder(
-            OPENPAGES_SERVER,
-            OPENPAGES_USERNAME,
-            OPENPAGES_PASSWORD
-        )
+        self.process_finder = ProcessFinder(openpages_client)
         
         # Find process and get documents
         process_info = await self.process_finder.find_process_with_health(process_id)
