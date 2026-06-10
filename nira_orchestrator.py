@@ -42,6 +42,7 @@ class DocumentMonitor:
     def __init__(self):
         self.cos_client = None
         self.http_client = None
+        self.session_cookies = None
         
         # Initialize COS client
         if all([COS_API_KEY, COS_INSTANCE_CRN, COS_ENDPOINT, COS_BUCKET_NAME]):
@@ -61,6 +62,43 @@ class DocumentMonitor:
         # Track processed documents
         self.processed_docs_file = "processed_documents.json"
         self.processed_docs = self.load_processed_docs()
+    
+    async def establish_session(self) -> bool:
+        """Establish authenticated session with OpenPages using form-based login"""
+        if not self.http_client:
+            self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
+        
+        try:
+            base_url = OPENPAGES_SERVER.rstrip('/') if OPENPAGES_SERVER else ""
+            login_url = f"{base_url}/j_security_check"
+            
+            print(f"🔐 Establishing session with OpenPages...")
+            
+            # Form-based login
+            login_data = {
+                'j_username': OPENPAGES_USERNAME,
+                'j_password': OPENPAGES_PASSWORD
+            }
+            
+            response = await self.http_client.post(
+                login_url,
+                data=login_data,
+                follow_redirects=True
+            )
+            
+            # Check if we got session cookies
+            if response.cookies and len(response.cookies) > 0:
+                print(f"✓ Session established - received {len(response.cookies)} cookie(s)")
+                # Mark session as established so we don't re-login
+                self.session_cookies = True
+                return True
+            
+            print("⚠ No session cookies received")
+            return False
+            
+        except Exception as e:
+            print(f"❌ Session establishment error: {str(e)}")
+            return False
     
     def load_processed_docs(self) -> set:
         """Load list of already processed document IDs from COS"""
@@ -108,13 +146,15 @@ class DocumentMonitor:
         if not self.http_client:
             self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
         
+        # Establish session if not already done
+        if not self.session_cookies:
+            await self.establish_session()
+        
         try:
             # Query for the process - use correct API endpoint
             url = f"{OPENPAGES_SERVER}/opgrc/api/v2/query"
             
-            auth_header = base64.b64encode(f"{OPENPAGES_USERNAME}:{OPENPAGES_PASSWORD}".encode()).decode()
             headers = {
-                'Authorization': f'Basic {auth_header}',
                 'Content-Type': 'application/json',
                 'Accept': 'application/json'
             }
@@ -149,13 +189,15 @@ class DocumentMonitor:
             self.http_client = httpx.AsyncClient(verify=False, follow_redirects=True, timeout=30.0)
         
         try:
-            # Use REST API to get child associations (documents) - same method as original find_process.py
-            url = f"{OPENPAGES_SERVER}/grc/api/contents/{resource_id}/associations/children"
+            # Remove /openpages from base URL and construct API URL (same as find_process.py)
+            base = OPENPAGES_SERVER.replace('/openpages', '').rstrip('/') if OPENPAGES_SERVER else ""
+            url = f"{base}/grc/api/contents/{resource_id}/associations/children"
             
             headers = {
                 'Accept': 'application/json'
             }
             
+            # Use Basic Auth (same as find_process.py)
             response = await self.http_client.get(
                 url,
                 headers=headers,
@@ -195,7 +237,7 @@ class DocumentMonitor:
                     doc_name = child.get('name', 'Unknown')
                     
                     # Get document details including parentFolderId
-                    detail_url = f"{OPENPAGES_SERVER}/grc/api/contents/{doc_id}"
+                    detail_url = f"{base}/grc/api/contents/{doc_id}"
                     detail_response = await self.http_client.get(
                         detail_url,
                         headers=headers,
