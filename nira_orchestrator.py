@@ -447,12 +447,22 @@ class DocumentMonitor:
                 print(f"   Downloading from COS...")
                 doc_response = self.cos_client.get_object(Bucket=COS_BUCKET_NAME, Key=key)
                 doc_content = doc_response['Body'].read()
+                print(f"   ✅ Downloaded ({len(doc_content)} bytes)")
                 
-                # Save temporarily
+                # Save temporarily with explicit flush
                 temp_path = f"/tmp/{filename}"
                 with open(temp_path, 'wb') as f:
                     f.write(doc_content)
-                print(f"   ✅ Downloaded ({len(doc_content)} bytes)")
+                    f.flush()
+                    os.fsync(f.fileno())
+                
+                # Verify file was saved
+                if not os.path.exists(temp_path):
+                    print(f"   ❌ Failed to save file to {temp_path}")
+                    continue
+                
+                file_size = os.path.getsize(temp_path)
+                print(f"   ✅ Saved to {temp_path} ({file_size} bytes)")
                 
                 # Get metadata (parentFolderId)
                 metadata = doc_response.get('Metadata', {})
