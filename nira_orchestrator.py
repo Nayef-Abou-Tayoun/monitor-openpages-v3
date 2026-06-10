@@ -11,12 +11,17 @@ import os
 import sys
 import asyncio
 import json
+import base64
+import requests
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import httpx
 import ibm_boto3
 from ibm_botocore.client import Config
 from dotenv import load_dotenv
+
+# Disable SSL warnings
+requests.packages.urllib3.disable_warnings()
 
 # Import our existing modules
 from find_process import ProcessFinder
@@ -147,37 +152,55 @@ class NIRAOrchestrator:
         # Initialize process finder
         self.process_finder = ProcessFinder(openpages_client)
         
-        # Find process and get documents
-        process_info = await self.process_finder.find_process_with_health(process_id)
+        # Find process by ID
+        process_info = await self.process_finder.find_process_by_id(process_id)
         
         if not process_info:
             self.log(f"❌ Process {process_id} not found")
             return []
         
-        documents = []
-        children = process_info.get('children', [])
+        self.log(f"✅ Found process: {process_id}")
         
-        for child in children:
-            if child.get('type') == 'SOXDocument':
-                doc_id = child.get('id')
-                doc_name = child.get('name', 'Unknown')
+        # Query for documents in the process
+        query = f"SELECT * FROM [SOXDocument] WHERE [Parent] = '{process_info.get('resource_id')}'"
+        result = await openpages_client.query(query, limit=100)
+        
+        documents = []
+        if result and result.get('rows'):
+            for doc in result['rows']:
+                doc_id = doc.get('resource_id')
+                doc_name = doc.get('name', 'Unknown')
                 
                 # Skip if already processed
                 if self.is_processed(doc_id):
                     self.log(f"   ⏭️  Skipping (already processed): {doc_name}")
                     continue
                 
-                # Download document content
-                content = await self.process_finder.download_document(doc_id)
+                # Get document content
+                doc_url = f"{OPENPAGES_SERVER}/rest/2/content/{doc_id}"
+                auth_header = base64.b64encode(f"{OPENPAGES_USERNAME}:{OPENPAGES_PASSWORD}".encode()).decode()
                 
-                if content:
-                    documents.append({
-                        'id': doc_id,
-                        'name': doc_name,
-                        'content': content,
-                        'size': len(content)
-                    })
-                    self.log(f"   ✅ Downloaded: {doc_name} ({len(content)} bytes)")
+                try:
+                    response = requests.get(
+                        doc_url,
+                        headers={'Authorization': f'Basic {auth_header}'},
+                        verify=False,
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        content = response.content
+                        documents.append({
+                            'id': doc_id,
+                            'name': doc_name,
+                            'content': content,
+                            'size': len(content)
+                        })
+                        self.log(f"   ✅ Downloaded: {doc_name} ({len(content)} bytes)")
+                    else:
+                        self.log(f"   ⚠️  Failed to download {doc_name}: HTTP {response.status_code}")
+                except Exception as e:
+                    self.log(f"   ❌ Error downloading {doc_name}: {str(e)}")
         
         self.log(f"✅ Found {len(documents)} new documents to process")
         return documents
