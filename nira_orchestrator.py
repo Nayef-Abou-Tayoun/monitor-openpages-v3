@@ -163,7 +163,18 @@ class DocumentMonitor:
             )
             
             if response.status_code == 200:
-                result = response.json()
+                # Check if response has content
+                if not response.text or response.text.strip() == '':
+                    print(f"✅ No documents found in process (empty response)")
+                    return []
+                
+                try:
+                    result = response.json()
+                except Exception as json_error:
+                    print(f"⚠ Response is not JSON. Status: {response.status_code}")
+                    print(f"   Response text: {response.text[:200]}")
+                    return []
+                
                 # The API returns a list of child objects
                 children = []
                 if isinstance(result, list):
