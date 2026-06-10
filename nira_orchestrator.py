@@ -347,9 +347,12 @@ class NIRAOrchestrator:
 
 
 async def main():
-    """Main entry point"""
+    """Main entry point - Continuous monitoring mode"""
     # Get process ID from command line or environment
     process_id = sys.argv[1] if len(sys.argv) > 1 else PROCESS_ID
+    
+    # Get check interval from environment (default 5 seconds)
+    check_interval = int(os.getenv('CHECK_INTERVAL_SECONDS', '5'))
     
     # Validate configuration
     if not all([OPENPAGES_SERVER, OPENPAGES_USERNAME, OPENPAGES_PASSWORD]):
@@ -357,17 +360,37 @@ async def main():
         print("   Required: OPENPAGES_SERVER, OPENPAGES_USERNAME, OPENPAGES_PASSWORD")
         sys.exit(1)
     
+    print(f"\n{'='*70}")
+    print(f"🔄 NIRA ORCHESTRATOR - CONTINUOUS MONITORING MODE")
+    print(f"{'='*70}")
+    print(f"Process: {process_id} ({PROCESS_NAME})")
+    print(f"Check Interval: {check_interval} seconds")
+    print(f"Press Ctrl+C to stop")
+    print(f"{'='*70}\n")
+    
+    orchestrator = NIRAOrchestrator()
+    
     try:
-        orchestrator = NIRAOrchestrator()
-        await orchestrator.run_workflow(process_id)
-        sys.exit(0)
+        while True:
+            try:
+                # Run workflow
+                await orchestrator.run_workflow(process_id)
+                
+                # Wait before next check
+                print(f"\n⏳ Waiting {check_interval} seconds before next check...")
+                await asyncio.sleep(check_interval)
+                
+            except Exception as e:
+                print(f"\n❌ Error in workflow: {e}")
+                import traceback
+                traceback.print_exc()
+                print(f"\n⏳ Waiting {check_interval} seconds before retry...")
+                await asyncio.sleep(check_interval)
+                
     except KeyboardInterrupt:
-        print("\n\n⏹ Workflow stopped by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print("\n\n⏹ Monitoring stopped by user")
+        sys.exit(0)
+
         sys.exit(1)
 
 
