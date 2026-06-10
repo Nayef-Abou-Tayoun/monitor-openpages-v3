@@ -464,12 +464,30 @@ class DocumentMonitor:
                 file_size = os.path.getsize(temp_path)
                 print(f"   ✅ Saved to {temp_path} ({file_size} bytes)")
                 
+                # Verify file is readable and check magic bytes
+                try:
+                    with open(temp_path, 'rb') as f:
+                        magic_bytes = f.read(4)
+                        print(f"   🔍 File magic bytes: {magic_bytes.hex()}")
+                        # DOCX files should start with PK (ZIP format): 50 4B 03 04
+                        if magic_bytes[:2] != b'PK':
+                            print(f"   ⚠️  Warning: File doesn't appear to be a valid ZIP/DOCX (expected PK, got {magic_bytes[:2].hex()})")
+                except Exception as e:
+                    print(f"   ❌ Error reading file: {str(e)}")
+                    continue
+                
+                # Double-check file still exists right before processing
+                if not os.path.exists(temp_path):
+                    print(f"   ❌ File disappeared before processing!")
+                    continue
+                
                 # Get metadata (parentFolderId)
                 metadata = doc_response.get('Metadata', {})
                 parent_folder_id = metadata.get('parentfolderid', '31628')
                 
                 # Process with Watson Orchestrate
                 print(f"   🤖 Processing with Watson Orchestrate...")
+                print(f"   📂 File exists: {os.path.exists(temp_path)}, Size: {os.path.getsize(temp_path)} bytes")
                 from process_concept_document import ConceptDocumentProcessor
                 
                 processor = ConceptDocumentProcessor()
